@@ -3,4 +3,9 @@ name = "clstr"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+[[bin]]
+name = "clstr"
+path = "src/main.rs"
+
+[target.'cfg(not(test))'.dependencies]
+clap = { version = "4.5.19", features = ["cargo"] }

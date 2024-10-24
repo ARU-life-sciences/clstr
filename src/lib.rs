@@ -1,13 +1,14 @@
 /*!
 A small crate to parse CD-HIT's .clstr file format. *Only tested with CD-HIT, not CD-HIT-EST.*
+Or actually another program in the `cd-hit` suite.
 */
 
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::num::{ParseFloatError, ParseIntError};
 use std::path::Path;
 
-/// A type alias for `Result<T, cdhit_parser::Error>`.
+/// A type alias for `Result<T, clstr::Error>`.
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// An error type for this crate.
@@ -67,61 +68,77 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Represents a single sequence entry in a cluster
+/// Represents a single sequence entry in a cluster.
 #[derive(Debug)]
 pub struct Sequence {
+    /// The length of the sequence.
     length: u32,
+    /// The sequence ID.
     id: String,
+    /// The percentage identity to the representative sequence.
     identity: Option<f32>,
+    /// Whether this sequence is the representative sequence.
     is_representative: bool,
 }
 
 impl Sequence {
+    /// Returns the length of the sequence.
     pub fn length(&self) -> u32 {
         self.length
     }
 
+    /// Returns the sequence ID.
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    /// Returns the percentage identity to the representative sequence, if available.
     pub fn identity(&self) -> Option<f32> {
         self.identity
     }
 
+    /// Returns whether this sequence is the representative sequence.
     pub fn is_representative(&self) -> bool {
         self.is_representative
     }
 }
 
-/// Represents a cluster containing multiple sequences
+/// Represents a cluster containing multiple sequences.
 #[derive(Debug)]
 pub struct Cluster {
+    /// The cluster ID.
     cluster_id: usize,
+    /// The sequences in this cluster.
     sequences: Vec<Sequence>,
 }
 
 impl Cluster {
+    /// Returns the cluster ID.
     pub fn cluster_id(&self) -> usize {
         self.cluster_id
     }
 
+    /// Returns the sequences in this cluster.
     pub fn sequences(&self) -> &Vec<Sequence> {
         &self.sequences
     }
 
+    /// Returns the representative sequence, if available.
     pub fn get_representative(&self) -> Option<&Sequence> {
         self.sequences.iter().find(|s| s.is_representative)
     }
 
+    /// Returns the number of sequences in this cluster.
     pub fn size(&self) -> usize {
         self.sequences.len()
     }
 }
 
-/// Iterator to parse .clstr file
+/// Iterator to parse `.clstr` file.
 pub struct ClstrParser<R: BufRead> {
+    /// The reader to parse the file.
     reader: R,
+    /// The current cluster being parsed.
     current_cluster: Option<Cluster>,
 }
 
@@ -172,6 +189,7 @@ impl<R: BufRead> Iterator for ClstrParser<R> {
     }
 }
 
+/// Parse a single sequence line from a cluster file.
 fn parse_sequence_line(line: &str) -> Result<Sequence> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() < 3 {
@@ -183,6 +201,7 @@ fn parse_sequence_line(line: &str) -> Result<Sequence> {
 
     let length_string = parts[1].to_string();
     let length = length_string
+        // FIXME: this only works for amino acids
         .strip_suffix("aa,")
         .ok_or_else(|| {
             Error::new(ErrorKind::ReadRecord(format!(
@@ -226,16 +245,84 @@ fn parse_sequence_line(line: &str) -> Result<Sequence> {
     })
 }
 
-/// Function to parse a .clstr file from a path
-pub fn parse_clstr<P: AsRef<Path>>(path: P) -> Result<ClstrParser<BufReader<File>>> {
+/// Function to parse a `.clstr` file from a path.
+pub fn from_path<P: AsRef<Path>>(path: P) -> Result<ClstrParser<BufReader<File>>> {
     let file = File::open(path).map_err(Error::from)?;
     let reader = BufReader::new(file);
     Ok(ClstrParser::new(reader))
 }
 
+/// Function to parse a `.clstr` file from a reader.
+pub fn from_reader<R: BufRead>(reader: R) -> ClstrParser<R> {
+    ClstrParser::new(reader)
+}
+
+/// Struct to write `.clstr` format files.
+pub struct ClstrWriter<W: Write> {
+    writer: W,
+}
+
+impl<W: Write> ClstrWriter<W> {
+    /// Creates a new `ClstrWriter`.
+    pub fn new(writer: W) -> Self {
+        ClstrWriter { writer }
+    }
+
+    /// Writes a cluster to the `.clstr` format.
+    pub fn write_cluster(&mut self, cluster: &Cluster) -> Result<()> {
+        // Write the cluster header: >Cluster <ID>
+        writeln!(self.writer, ">Cluster {}", cluster.cluster_id())?;
+
+        // Write each sequence in the cluster.
+        for (index, seq) in cluster.sequences().iter().enumerate() {
+            self.write_sequence(index, seq)?;
+        }
+
+        Ok(())
+    }
+
+    /// Writes a single sequence to the `.clstr` format.
+    fn write_sequence(&mut self, index: usize, sequence: &Sequence) -> Result<()> {
+        // Format sequence like: 0    4481aa, >sp|P0C6T5|R1A_BCHK5... at 99.89%
+        write!(
+            self.writer,
+            "{}    {}aa, >{}...",
+            index,
+            sequence.length(),
+            sequence.id()
+        )?;
+
+        // If there's an identity percentage, write it
+        if let Some(identity) = sequence.identity() {
+            write!(self.writer, " at {:.2}%", identity)?;
+        }
+
+        // Mark the representative sequence with an asterisk (*)
+        if sequence.is_representative() {
+            write!(self.writer, " *")?;
+        }
+
+        writeln!(self.writer)?;
+
+        Ok(())
+    }
+
+    /// Finalize the writer by flushing any remaining output.
+    pub fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+/// Helper function to create a writer from a file path.
+pub fn to_path<P: AsRef<Path>>(path: P) -> Result<ClstrWriter<File>> {
+    let file = File::create(path)?;
+    Ok(ClstrWriter::new(file))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn test_clstr_parsing() {
@@ -270,5 +357,35 @@ mod tests {
         assert_eq!(cluster1.sequences()[0].id(), "sp|P0C6U3|R1A_CVHN1");
         assert_eq!(cluster1.sequences()[0].identity(), Some(99.91));
         assert!(!cluster1.sequences()[0].is_representative());
+    }
+
+    #[test]
+    fn test_write_cluster() {
+        let sequence1 = Sequence {
+            length: 4481,
+            id: "sp|P0C6T5|R1A_BCHK5".to_string(),
+            identity: Some(99.89),
+            is_representative: false,
+        };
+
+        let sequence2 = Sequence {
+            length: 7182,
+            id: "sp|P0C6W4|R1AB_BCHK5".to_string(),
+            identity: None,
+            is_representative: true,
+        };
+
+        let cluster = Cluster {
+            cluster_id: 0,
+            sequences: vec![sequence1, sequence2],
+        };
+
+        let mut output = Cursor::new(Vec::new());
+        let mut writer = ClstrWriter::new(&mut output);
+        writer.write_cluster(&cluster).unwrap();
+        writer.flush().unwrap();
+
+        let output_str = String::from_utf8(output.into_inner()).unwrap();
+        assert_eq!(output_str, ">Cluster 0\n0    4481aa, >sp|P0C6T5|R1A_BCHK5... at 99.89%\n1    7182aa, >sp|P0C6W4|R1AB_BCHK5... *\n");
     }
 }
