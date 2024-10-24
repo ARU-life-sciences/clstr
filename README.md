@@ -32,3 +32,7 @@ fn main() -> Result<(), std::error::Error> {
     Ok(())
 }
 ```
+
+## Binaries
+
+There are two programs `clstr topn` and `clstr tofasta` which are used in `vscan`.
