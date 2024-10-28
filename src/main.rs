@@ -1,16 +1,20 @@
 // clstr
 // part of `vscan`
-// at the moment, this simply takes a clstr file and writes the top N clusters
+// A tool for processing `.clstr` files produced by CD-HIT.
 
-use std::{
-    collections::HashMap,
-    fs::File,
-    path::{Path, PathBuf},
-};
+// currently functionality:
+// - `topn`: write the top N clusters to a new file.
+// - `filtern`: write clusters with at least N records to a new file.
+// - `tofasta`: generate multiple fasta files given an input cluster file.
+// - `stats`: get statistics on a CD-HIT cluster file.
+
+use std::{collections::HashMap, fs::File, path::PathBuf};
 
 use bio::io::fasta;
 use clap::{crate_version, value_parser, Arg, ArgMatches, Command};
 use clstr::{Cluster, Result as ClstrResult};
+use flate2::read::GzDecoder;
+use std::io::{BufReader, Read, Write};
 
 fn parse_args() -> ArgMatches {
     Command::new("clstr")
@@ -20,6 +24,18 @@ fn parse_args() -> ArgMatches {
         .help_expected(true)
         .max_term_width(80)
         .subcommand_required(true)
+        .subcommand(
+            Command::new("stats")
+                .about("Get statistics on a CD-HIT cluster file.")
+                .arg(
+                    Arg::new("FILE")
+                        .help("The input file in `.clstr` format.")
+                        .id("FILE")
+                        .value_parser(value_parser!(PathBuf))
+                        .required(true)
+                        .index(1),
+                )
+        )
         .subcommand(
             Command::new("topn")
                 .about("Write the top N clusters to a new file.")
@@ -43,6 +59,28 @@ fn parse_args() -> ArgMatches {
                 ),
         )
         .subcommand(
+            Command::new("filtern")
+                .about("Write clusters with at least N records to a new file.")
+                .arg(
+                    Arg::new("FILE")
+                        .help("The input file in `.clstr` format.")
+                        .id("FILE")
+                        .value_parser(value_parser!(PathBuf))
+                        .required(true)
+                        .index(1),
+                )
+                .arg(
+                    Arg::new("filter-number")
+                        .help("The minimum number of sequences in a cluster for it to be written to the output file.")
+                        .id("filter-number")
+                        .short('n')
+                        .long("filter-number")
+                        .num_args(1)
+                        .value_parser(value_parser!(usize))
+                        .default_value("20"),
+                ),
+        )
+        .subcommand(
             Command::new("tofasta")
                 .about("Generate multiple fasta files given an input cluster file.")
                 .arg(
@@ -56,7 +94,7 @@ fn parse_args() -> ArgMatches {
                 )
                 .arg(
                     Arg::new("DATABASE")
-                        .help("The database file containing sequences, from which the cluster file was derived.")
+                        .help("The database file containing sequences, from which the cluster file was derived. Gzipped or not.")
                         .id("DATABASE")
                         .value_parser(value_parser!(PathBuf))
                         .required(true)
@@ -65,6 +103,25 @@ fn parse_args() -> ArgMatches {
                 )
         )
         .get_matches()
+}
+
+fn filter_n(matches: &ArgMatches) -> ClstrResult<()> {
+    let clstr_file = matches.get_one::<PathBuf>("FILE").unwrap().clone();
+    let filter_threshold = *matches.get_one::<usize>("filter-number").unwrap();
+
+    let parser = clstr::from_path(clstr_file.clone())?;
+
+    let mut out_file =
+        clstr::to_path(clstr_file.with_extension(format!("more_than_{}.clstr", filter_threshold)))?;
+    for cluster in parser {
+        let cluster = cluster?;
+
+        if cluster.size() >= filter_threshold {
+            out_file.write_cluster(&cluster)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn top_n(matches: &ArgMatches) -> ClstrResult<()> {
@@ -93,19 +150,20 @@ fn top_n(matches: &ArgMatches) -> ClstrResult<()> {
 }
 
 /// A function to read the FASTA file and return a map of sequence ID to sequence data.
-fn read_fasta<P: AsRef<Path> + std::fmt::Debug>(
-    fasta_path: P,
-) -> ClstrResult<HashMap<String, (String, String)>> {
+fn read_fasta(fasta_path: PathBuf) -> ClstrResult<HashMap<String, (String, String)>> {
     let mut fasta_map = HashMap::new();
 
-    let records = fasta::Reader::from_file(fasta_path)
-        .map_err(|e| {
-            clstr::Error::from(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?
-        .records();
+    let reader: Box<dyn Read> = if fasta_path.extension().and_then(|s| s.to_str()) == Some("gz") {
+        // If the file is gzipped, use GzDecoder
+        let file = File::open(fasta_path.clone())?;
+        Box::new(GzDecoder::new(file))
+    } else {
+        // Otherwise, use a regular file reader
+        let file = File::open(fasta_path.clone())?;
+        Box::new(BufReader::new(file))
+    };
+
+    let records = fasta::Reader::new(reader).records();
 
     for record in records {
         let rec = record?;
@@ -116,24 +174,6 @@ fn read_fasta<P: AsRef<Path> + std::fmt::Debug>(
     }
 
     Ok(fasta_map)
-}
-
-fn to_fasta(matches: &ArgMatches) -> ClstrResult<()> {
-    let clstr_file = matches.get_one::<PathBuf>("FILE").unwrap().clone();
-    let database_file = matches.get_one::<PathBuf>("DATABASE").unwrap().clone();
-
-    let fasta_map = read_fasta(database_file)?;
-
-    let cluster_parser = clstr::from_path(clstr_file.clone())?;
-
-    for cluster in cluster_parser {
-        let cluster = cluster?;
-        let cluster_id = cluster.cluster_id();
-        let out_file = File::create(clstr_file.with_extension(format!("{}.fasta", cluster_id)))?;
-        write_cluster_to_fasta(&cluster, &fasta_map, out_file)?;
-    }
-
-    Ok(())
 }
 
 /// Writes sequences from a cluster into a FASTA file.
@@ -149,9 +189,65 @@ fn write_cluster_to_fasta<P: std::io::Write>(
             let record = fasta::Record::with_attrs(id, Some(desc), fasta_sequence.as_bytes());
             writer.write_record(&record)?;
         } else {
+            // FIXME: should this be a hard error?
             eprintln!("Warning: sequence ID {} not found in FASTA", sequence.id());
         }
     }
+
+    Ok(())
+}
+
+fn to_fasta(matches: &ArgMatches) -> ClstrResult<()> {
+    let clstr_file = matches.get_one::<PathBuf>("FILE").unwrap().clone();
+    let database_file = matches.get_one::<PathBuf>("DATABASE").unwrap().clone();
+
+    // will this work for massive fastas..?
+    let fasta_map = read_fasta(database_file)?;
+
+    let cluster_parser = clstr::from_path(clstr_file.clone())?;
+
+    for cluster in cluster_parser {
+        let cluster = cluster?;
+
+        let cluster_id =
+            if let Some(representative_cluster_id) = cluster.get_representative().map(|e| e.id()) {
+                let rcid = fasta_map
+                    .get(representative_cluster_id)
+                    .map(|(desc, _)| desc.clone())
+                    .unwrap_or_else(|| "no-description".to_string());
+
+                rcid.replace(" ", "_").replace("/", "_")
+            } else {
+                "No representative".to_string()
+            };
+
+        let out_file = File::create(clstr_file.with_extension(format!("{}.fasta", cluster_id)))?;
+        write_cluster_to_fasta(&cluster, &fasta_map, out_file)?;
+    }
+
+    Ok(())
+}
+
+fn stats(matches: &ArgMatches) -> ClstrResult<()> {
+    let clstr_file = matches.get_one::<PathBuf>("FILE").unwrap().clone();
+    let parser = clstr::from_path(clstr_file.clone())?;
+
+    // make a writer to stdout
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+
+    let mut cluster_count = 0;
+    let mut sequence_count = 0;
+
+    for cluster in parser {
+        let cluster = cluster?;
+        cluster_count += 1;
+        sequence_count += cluster.size();
+    }
+
+    // write a tiny tsv
+    let _ = writeln!(handle, "Cluster count\tSequence count");
+    let _ = writeln!(handle, "{}\t{}", cluster_count, sequence_count);
 
     Ok(())
 }
@@ -162,6 +258,8 @@ fn main() -> ClstrResult<()> {
     match matches.subcommand() {
         Some(("topn", matches)) => top_n(matches)?,
         Some(("tofasta", matches)) => to_fasta(matches)?,
+        Some(("filtern", matches)) => filter_n(matches)?,
+        Some(("stats", matches)) => stats(matches)?,
         _ => unreachable!("Exhausted list of subcommands and subcommand_required prevents `None`"),
     }
 
