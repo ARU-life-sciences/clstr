@@ -2,6 +2,15 @@
 name = "clstr"
 version = "0.1.1"
 edition = "2021"
+repository = "https://github.com/tolkit/vscan/tree/main/src/clstr"
+documentation = "https://docs.rs/clstr"
+homepage = "https://github.com/tolkit/vscan/tree/main/src/clstr"
+description = """
+A library to parse and write .clstr files from 'CD-HIT', as well as a small
+binary with simple functionality.
+"""
+categories = ["science"]
+license = "MIT"
 
 [[bin]]
 name = "clstr"
