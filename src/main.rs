@@ -11,7 +11,7 @@
 use std::{collections::HashMap, fs::File, path::PathBuf};
 
 use bio::io::fasta;
-use clap::{crate_version, value_parser, Arg, ArgMatches, Command};
+use clap::{crate_version, value_parser, Arg, ArgAction, ArgMatches, Command};
 use clstr::{Cluster, Result as ClstrResult};
 use flate2::read::GzDecoder;
 use std::io::{BufReader, Read, Write};
@@ -34,6 +34,14 @@ fn parse_args() -> ArgMatches {
                         .value_parser(value_parser!(PathBuf))
                         .required(true)
                         .index(1),
+                )
+                .arg(
+                    Arg::new("table")
+                        .help("Print each cluster and number of sequences per cluster")
+                        .id("table")
+                        .short('t')
+                        .long("table")
+                        .action(ArgAction::SetTrue)
                 )
         )
         .subcommand(
@@ -230,11 +238,20 @@ fn to_fasta(matches: &ArgMatches) -> ClstrResult<()> {
 
 fn stats(matches: &ArgMatches) -> ClstrResult<()> {
     let clstr_file = matches.get_one::<PathBuf>("FILE").unwrap().clone();
+    let table = matches.get_flag("table");
     let parser = clstr::from_path(clstr_file.clone())?;
 
     // make a writer to stdout
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
+
+    if table {
+        for cluster in parser {
+            let cluster = cluster?;
+            let _ = writeln!(handle, "{}\t{}", cluster.cluster_id(), cluster.size());
+        }
+        return Ok(());
+    }
 
     let mut cluster_count = 0;
     let mut sequence_count = 0;
@@ -245,9 +262,18 @@ fn stats(matches: &ArgMatches) -> ClstrResult<()> {
         sequence_count += cluster.size();
     }
 
+    let avg_sequence_count_per_cluster = sequence_count as f64 / cluster_count as f64;
+
     // write a tiny tsv
-    let _ = writeln!(handle, "Cluster count\tSequence count");
-    let _ = writeln!(handle, "{}\t{}", cluster_count, sequence_count);
+    let _ = writeln!(
+        handle,
+        "Cluster count\tSequence count\tAvg seqs per cluster"
+    );
+    let _ = writeln!(
+        handle,
+        "{}\t{}\t{}",
+        cluster_count, sequence_count, avg_sequence_count_per_cluster
+    );
 
     Ok(())
 }
