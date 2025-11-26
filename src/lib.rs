@@ -58,21 +58,29 @@ impl From<ParseFloatError> for Error {
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match *self.0 {
-            ErrorKind::Io(ref err) => write!(f, "I/O error - {}", err),
-            ErrorKind::Int(ref err) => write!(f, "parsing integer error - {}", err),
-            ErrorKind::Float(ref err) => write!(f, "parsing float error - {}", err),
-            ErrorKind::ReadRecord(ref err) => write!(f, "reading record - {}", err),
+            ErrorKind::Io(ref err) => write!(f, "I/O error - {err}"),
+            ErrorKind::Int(ref err) => write!(f, "parsing integer error - {err}"),
+            ErrorKind::Float(ref err) => write!(f, "parsing float error - {err}"),
+            ErrorKind::ReadRecord(ref err) => write!(f, "reading record - {err}"),
         }
     }
 }
 
 impl std::error::Error for Error {}
 
+#[derive(Debug, Clone, Copy)]
+pub enum LengthUnit {
+    Aa,
+    Nt,
+}
+
 /// Represents a single sequence entry in a cluster.
 #[derive(Debug)]
 pub struct Sequence {
     /// The length of the sequence.
     length: u32,
+    /// Whether amino acid or nucleotide
+    unit: LengthUnit,
     /// The sequence ID.
     id: String,
     /// The percentage identity to the representative sequence.
@@ -194,55 +202,106 @@ fn parse_sequence_line(line: &str) -> Result<Sequence> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() < 3 {
         return Err(Error::new(ErrorKind::ReadRecord(format!(
-            "Invalid sequence line: {}",
-            line
+            "Invalid sequence line: {line}"
         ))));
     }
 
-    let length_string = parts[1].to_string();
-    let length = length_string
-        // FIXME: this only works for amino acids
-        .strip_suffix("aa,")
-        .ok_or_else(|| {
-            Error::new(ErrorKind::ReadRecord(format!(
-                "Invalid length format: {}",
-                line
-            )))
-        })?
-        .parse::<u32>()
-        .map_err(Error::from)?;
+    // parts[1] is something like "4481aa," or "100nt,"
+    let len_token = parts[1].trim_end_matches(',');
+    let split_pos = len_token
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(len_token.len());
+    let (len_num, len_unit) = len_token.split_at(split_pos);
 
+    let length = len_num.parse::<u32>()?;
+
+    let unit = match len_unit {
+        "aa" => LengthUnit::Aa,
+        "nt" => LengthUnit::Nt,
+        other => {
+            return Err(Error::new(ErrorKind::ReadRecord(format!(
+                "Unknown length unit {other} in line: {line}"
+            ))))
+        }
+    };
+
+    // ID parsing unchanged for now
     let id = parts[2]
         .trim_start_matches('>')
         .split("...")
         .next()
-        .ok_or_else(|| {
-            Error::new(ErrorKind::ReadRecord(format!(
-                "Invalid ID format: {}",
-                line
-            )))
-        })?
+        .ok_or_else(|| Error::new(ErrorKind::ReadRecord(format!("Invalid ID format: {line}"))))?
         .to_string();
 
     let is_representative = line.ends_with('*');
 
-    let identity = if let Some(at_pos) = line.find(" at ") {
-        Some(
-            line[at_pos + 4..]
-                .trim_end_matches('%')
-                .parse::<f32>()
-                .map_err(Error::from)?,
-        )
-    } else {
-        None
-    };
+    let identity = parse_identity(line)?;
 
     Ok(Sequence {
         length,
+        unit,
         id,
         identity,
         is_representative,
     })
+}
+
+fn parse_identity(line: &str) -> Result<Option<f32>> {
+    let at_pos = match line.find(" at ") {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    // Take the token immediately after " at "
+    let rest = &line[at_pos + 4..];
+    let token = rest
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('%')
+        .trim();
+
+    if token.is_empty() {
+        return Ok(None);
+    }
+
+    // Handle tokens that contain "/", e.g.
+    //   "-/97.54"
+    //   "+/95.70"
+    //   "99.89/100"
+    if let Some((a, b)) = token.split_once('/') {
+        let a = a.trim();
+        let b = b.trim();
+
+        // cd-hit-est style: "-/97.54" or "+/95.70"
+        // Use the numeric part (b) as identity.
+        let primary = if a == "-" || a == "+" || a.is_empty() {
+            b
+        } else {
+            // e.g. "99.89/100" – use the first numeric part
+            a
+        };
+
+        return parse_identity_token(primary);
+    }
+
+    // Simple case: "99.89"
+    parse_identity_token(token)
+}
+
+fn parse_identity_token(token: &str) -> Result<Option<f32>> {
+    let t = token.trim();
+
+    // Strip leading "+"
+    let t = t.trim_start_matches('+');
+
+    // A bare "-" means "no similarity"
+    if t == "-" || t.is_empty() {
+        return Ok(None);
+    }
+
+    let value = t.parse::<f32>()?;
+    Ok(Some(value))
 }
 
 /// Function to parse a `.clstr` file from a path.
@@ -283,21 +342,24 @@ impl<W: Write> ClstrWriter<W> {
 
     /// Writes a single sequence to the `.clstr` format.
     fn write_sequence(&mut self, index: usize, sequence: &Sequence) -> Result<()> {
-        // Format sequence like: 0    4481aa, >sp|P0C6T5|R1A_BCHK5... at 99.89%
+        let unit = match sequence.unit {
+            LengthUnit::Aa => "aa",
+            LengthUnit::Nt => "nt",
+        };
+
         write!(
             self.writer,
-            "{}    {}aa, >{}...",
+            "{}    {}{}, >{}...",
             index,
             sequence.length(),
+            unit,
             sequence.id()
         )?;
 
-        // If there's an identity percentage, write it
         if let Some(identity) = sequence.identity() {
-            write!(self.writer, " at {:.2}%", identity)?;
+            write!(self.writer, " at {identity:.2}%")?;
         }
 
-        // Mark the representative sequence with an asterisk (*)
         if sequence.is_representative() {
             write!(self.writer, " *")?;
         }
@@ -363,6 +425,7 @@ mod tests {
     fn test_write_cluster() {
         let sequence1 = Sequence {
             length: 4481,
+            unit: LengthUnit::Aa,
             id: "sp|P0C6T5|R1A_BCHK5".to_string(),
             identity: Some(99.89),
             is_representative: false,
@@ -370,6 +433,7 @@ mod tests {
 
         let sequence2 = Sequence {
             length: 7182,
+            unit: LengthUnit::Aa,
             id: "sp|P0C6W4|R1AB_BCHK5".to_string(),
             identity: None,
             is_representative: true,
@@ -387,5 +451,24 @@ mod tests {
 
         let output_str = String::from_utf8(output.into_inner()).unwrap();
         assert_eq!(output_str, ">Cluster 0\n0    4481aa, >sp|P0C6T5|R1A_BCHK5... at 99.89%\n1    7182aa, >sp|P0C6W4|R1AB_BCHK5... *\n");
+    }
+
+    #[test]
+    fn test_nt_identity_weird_tokens() {
+        let data = b">Cluster 479
+0       122nt, >::SUPER_5:20757114-20757236... at -/97.54%
+1       186nt, >::SUPER_4:13803815-13804001... at +/95.70%
+2       198nt, >::SUPER_2:18124787-18124985... *
+" as &[u8];
+
+        let mut parser = ClstrParser::new(data);
+
+        let cluster = parser.next().unwrap().unwrap();
+        assert_eq!(cluster.cluster_id(), 0);
+        assert_eq!(cluster.size(), 3);
+
+        assert_eq!(cluster.sequences()[0].identity(), Some(97.54));
+        assert_eq!(cluster.sequences()[1].identity(), Some(95.70));
+        assert_eq!(cluster.sequences()[2].identity(), None);
     }
 }

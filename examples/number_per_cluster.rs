@@ -1,6 +1,5 @@
 extern crate clstr;
 
-use clstr::parse_clstr;
 use std::io::Write;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("Please provide a .clstr file");
 
     // Parse the .clstr file using the parser
-    let parser = parse_clstr(clstr_file)?;
+    let parser = clstr::from_path(clstr_file)?;
 
     // write to stdout using std::io
     let mut stdout = std::io::stdout();

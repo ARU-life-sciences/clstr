@@ -120,7 +120,7 @@ fn filter_n(matches: &ArgMatches) -> ClstrResult<()> {
     let parser = clstr::from_path(clstr_file.clone())?;
 
     let mut out_file =
-        clstr::to_path(clstr_file.with_extension(format!("more_than_{}.clstr", filter_threshold)))?;
+        clstr::to_path(clstr_file.with_extension(format!("more_than_{filter_threshold}.clstr")))?;
     for cluster in parser {
         let cluster = cluster?;
 
@@ -149,7 +149,7 @@ fn top_n(matches: &ArgMatches) -> ClstrResult<()> {
 
     // and write these to file
     let mut out_file =
-        clstr::to_path(clstr_file.with_extension(format!("top{}.clstr", cluster_number)))?;
+        clstr::to_path(clstr_file.with_extension(format!("top{cluster_number}.clstr")))?;
     for cluster in clusters {
         out_file.write_cluster(&cluster)?;
     }
@@ -229,7 +229,7 @@ fn to_fasta(matches: &ArgMatches) -> ClstrResult<()> {
                 "No representative".to_string()
             };
 
-        let out_file = File::create(clstr_file.with_extension(format!("{}.fasta", cluster_id)))?;
+        let out_file = File::create(clstr_file.with_extension(format!("{cluster_id}.fasta")))?;
         write_cluster_to_fasta(&cluster, &fasta_map, out_file)?;
     }
 
@@ -271,8 +271,7 @@ fn stats(matches: &ArgMatches) -> ClstrResult<()> {
     );
     let _ = writeln!(
         handle,
-        "{}\t{}\t{}",
-        cluster_count, sequence_count, avg_sequence_count_per_cluster
+        "{cluster_count}\t{sequence_count}\t{avg_sequence_count_per_cluster}"
     );
 
     Ok(())
@@ -281,12 +280,16 @@ fn stats(matches: &ArgMatches) -> ClstrResult<()> {
 fn main() -> ClstrResult<()> {
     let matches = parse_args();
 
-    match matches.subcommand() {
-        Some(("topn", matches)) => top_n(matches)?,
-        Some(("tofasta", matches)) => to_fasta(matches)?,
-        Some(("filtern", matches)) => filter_n(matches)?,
-        Some(("stats", matches)) => stats(matches)?,
+    let result = match matches.subcommand() {
+        Some(("topn", matches)) => top_n(matches),
+        Some(("tofasta", matches)) => to_fasta(matches),
+        Some(("filtern", matches)) => filter_n(matches),
+        Some(("stats", matches)) => stats(matches),
         _ => unreachable!("Exhausted list of subcommands and subcommand_required prevents `None`"),
+    };
+
+    if result.is_err() {
+        eprintln!("clstr error: {}", result.unwrap_err());
     }
 
     Ok(())

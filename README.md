@@ -1,6 +1,6 @@
 # `clstr`
 
-A small crate to parse and write `.clstr` files.
+A small crate to parse and write `.clstr` files. Parses the standard CD-HIT ``.clstr` format as produced by `cd-hit`, `cd-hit-est`, `cd-hit-2d`, `cd-hit-est-2d`, and related tools. Supports both amino-acid (aa) and nucleotide (nt) clusters, and tolerates identity fields like at 99.9%, at 99.9%/100%, and at -/100%.
 
 ## API 
 
@@ -35,4 +35,4 @@ fn main() -> Result<(), std::error::Error> {
 
 ## Binaries
 
-There are two programs `clstr topn` and `clstr tofasta` which are used in `vscan`.
+TODO, describe binaries.
